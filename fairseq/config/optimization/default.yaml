@@ -1,0 +1,8 @@
+# @package _group_
+max_update: 286000
+stop_min_lr: 1e-09
+clip_norm: 0.1
+update_freq:
+  - 1
+lr:
+  - 1.0

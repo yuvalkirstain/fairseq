@@ -2,18 +2,25 @@
 
 hydra:
   run:
-    dir: .
+    dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 defaults:
     - _self_
-    - task: null
-    - model: null
-    - criterion: cross_entropy
-    - optimizer: null
-    - lr_scheduler: fixed
+    - checkpoint: default
+    - common: default
+    - criterion: adaptive_loss
+    - dataset: default
+    - lr_scheduler: cosine
+    - model: transformer_lm/transformer_lm_wiki103
+    - optimization: default
+    - optimizer: nag
+    - task: language_modeling
     - bpe: null
     - tokenizer: null
     - scoring: null
     - generation: null
     - common_eval: null
     - eval_lm: null
+
+distributed_training:
+  ddp_backend: legacy_ddp
