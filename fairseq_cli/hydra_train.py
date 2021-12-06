@@ -17,14 +17,48 @@ from fairseq.utils import reset_logging
 import hydra
 from hydra.core.hydra_config import HydraConfig
 import torch
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf, open_dict, DictConfig
 
+import rich.syntax
+import rich.tree
 
 logger = logging.getLogger("fairseq_cli.hydra_train")
 
 
+def print_config(
+    config: FairseqConfig,
+    resolve: bool = True,
+) -> None:
+    """Prints content of DictConfig using Rich library and its tree structure.
+    Args:
+        config (DictConfig): Configuration composed by Hydra.
+        fields (Sequence[str], optional): Determines which main fields from config will
+        be printed and in what order.
+        resolve (bool, optional): Whether to resolve reference fields of DictConfig.
+    """
+
+    style = "dim"
+    tree = rich.tree.Tree("CONFIG", style=style, guide_style=style)
+
+    fields = config.keys()
+    for field in fields:
+        branch = tree.add(field, style=style, guide_style=style)
+
+        config_section = config.get(field)
+        branch_content = str(config_section)
+        if isinstance(config_section, DictConfig):
+            branch_content = OmegaConf.to_yaml(config_section, resolve=resolve)
+
+        branch.add(rich.syntax.Syntax(branch_content, "yaml"))
+
+    rich.print(tree)
+
+    with open("config_tree.txt", "w") as fp:
+        rich.print(tree, file=fp)
+
 @hydra.main(config_path=os.path.join("..", "fairseq", "config"), config_name="config")
 def hydra_main(cfg: FairseqConfig) -> float:
+    print_config(cfg)
     _hydra_main(cfg)
 
 
