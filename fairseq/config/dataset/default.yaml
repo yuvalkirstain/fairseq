@@ -1,5 +1,5 @@
 # @package _group_
 batch_size: null
-max_tokens: 9216
+max_tokens: 36864
 skip_invalid_size_inputs_valid_test: true
 required_batch_size_multiple: 1

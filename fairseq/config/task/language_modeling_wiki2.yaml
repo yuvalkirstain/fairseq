@@ -1,0 +1,4 @@
+# @package _group_
+data: /home/olab/kirstain/fairseq/data-bin/wikitext-2
+tokens_per_sample: 64
+sample_break_mode: none

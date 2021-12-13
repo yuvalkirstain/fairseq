@@ -16,7 +16,7 @@ def create_slurm_script(slurm_name, run_name, working_dir, time, n_gpus, script_
 #SBATCH --partition="killable"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --mem=50000 
+#SBATCH --mem=30000 
 #SBATCH --cpus-per-task=4
 #SBATCH --constraint="geforce_rtx_3090"
 #SBATCH --gpus={n_gpus}

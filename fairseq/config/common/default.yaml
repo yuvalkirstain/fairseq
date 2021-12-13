@@ -2,4 +2,4 @@
 seed: 1
 fp16: true
 wandb_project: fairseq
-# wandb_run_name: ${now:%Y-%m-%d}::${now:%H-%M-%S}
+wandb_run_name: ${now:%Y-%m-%d}::${now:%H-%M-%S}

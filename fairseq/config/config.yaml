@@ -11,7 +11,7 @@ defaults:
     - criterion: adaptive_loss
     - dataset: default
     - lr_scheduler: cosine
-    - model: transformer_lm/transformer_lm_wiki103
+    - model: transformer_lm/transformer_lm_gpt_wiki2
     - optimization: default
     - optimizer: nag
     - task: language_modeling
@@ -24,3 +24,4 @@ defaults:
 
 distributed_training:
   ddp_backend: legacy_ddp
+  distributed_world_size: 1

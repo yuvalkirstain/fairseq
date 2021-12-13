@@ -267,9 +267,8 @@ def train(
             if distributed_utils.is_master(cfg.distributed_training)
             else None
         ),
-        wandb_run_name=os.environ.get(
-            "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
-        ),
+        wandb_run_name=cfg.common.wandb_run_name
+        ,
         azureml_logging=(
             cfg.common.azureml_logging
             if distributed_utils.is_master(cfg.distributed_training)
@@ -448,9 +447,7 @@ def validate(
                 if distributed_utils.is_master(cfg.distributed_training)
                 else None
             ),
-            wandb_run_name=os.environ.get(
-                "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
-            ),
+            wandb_run_name=cfg.common.wandb_run_name,
         )
 
         # create a new root metrics aggregator so validation metrics
