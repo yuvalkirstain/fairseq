@@ -38,6 +38,8 @@ class FairseqAdafactor(LegacyFairseqOptimizer):
                                  'otherwise use external learning rate')
         parser.add_argument('--warmup-init', action='store_true',
                             help='use relative step for warm-up learning rate schedule')
+        parser.add_argument('--factor-momentum', action='store_true',
+                            help='Factor momentum')
         # fmt: on
 
     @property
@@ -60,6 +62,7 @@ class FairseqAdafactor(LegacyFairseqOptimizer):
             "scale_parameter": self.args.scale_parameter,  # defaults to False
             "relative_step": self.args.relative_step,  # defaults to False
             "warmup_init": self.args.warmup_init,
+            "factor_momentum":self.args.factor_momentum
         }
 
 
@@ -109,6 +112,7 @@ class Adafactor(torch.optim.Optimizer):
         scale_parameter=True,
         relative_step=True,
         warmup_init=False,
+        factor_momentum=False,
     ):
         if lr is not None and relative_step:
             raise ValueError("Cannot combine manual lr and relative_step options")
@@ -125,6 +129,7 @@ class Adafactor(torch.optim.Optimizer):
             scale_parameter=scale_parameter,
             relative_step=relative_step,
             warmup_init=warmup_init,
+            factor_momentum=factor_momentum,
         )
         super(Adafactor, self).__init__(params, defaults)
 
@@ -150,15 +155,27 @@ class Adafactor(torch.optim.Optimizer):
 
     def _get_options(self, param_group, param_shape):
         factored = len(param_shape) >= 2
+        # assert 
+        # print(factored)
         use_first_moment = param_group["beta1"] is not None
         return factored, use_first_moment
 
     def _rms(self, tensor):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
-
+    def _clamp_mult(self,r_factor, c_factor,neg_r_factor, neg_c_factor):
+        return torch.mul(r_factor.nan_to_num(), c_factor.nan_to_num()) -torch.mul(neg_r_factor.nan_to_num(), neg_c_factor.nan_to_num())    
+    def _approx_comp(self, update):
+        update = torch.nn.functional.relu(update)
+        exp_avg_sq_row = update.mean(dim=-1)
+        exp_avg_sq_col = update.mean(dim=-2)
+        r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).unsqueeze(-1)
+        c_factor = exp_avg_sq_col.unsqueeze(-2)
+        return r_factor, c_factor
+        
     def _approx_sq_grad(self, exp_avg_sq_row, exp_avg_sq_col):
         r_factor = (
-            (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True))
+            (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1,
+                     keepdim=True))
             .rsqrt_()
             .unsqueeze(-1)
         )
@@ -172,6 +189,8 @@ class Adafactor(torch.optim.Optimizer):
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+        
+        factor_momentum = self.defaults['factor_momentum']
         loss = None
         if closure is not None:
             loss = closure()
@@ -195,8 +214,18 @@ class Adafactor(torch.optim.Optimizer):
                     state["step"] = 0
 
                     if use_first_moment:
+                        if factor_momentum:
                         # Exponential moving average of gradient values
-                        state["exp_avg"] = torch.zeros_like(grad)
+                            state["exp_avg_mom_row_pos"] = torch.zeros(grad_shape[:-1]).to(grad)
+                            state["exp_avg_mom_col_pos"] = torch.zeros(
+                                grad_shape[:-2] + grad_shape[-1:]
+                            ).to(grad)
+                            state["exp_avg_mom_row_neg"] = torch.zeros(grad_shape[:-1]).to(grad)
+                            state["exp_avg_mom_col_neg"] = torch.zeros(
+                                grad_shape[:-2] + grad_shape[-1:]
+                            ).to(grad)
+                        else:
+                            state["exp_avg"] = torch.zeros_like(grad)
                     if factored:
                         state["exp_avg_sq_row"] = torch.zeros(grad_shape[:-1]).to(grad)
                         state["exp_avg_sq_col"] = torch.zeros(
@@ -207,8 +236,16 @@ class Adafactor(torch.optim.Optimizer):
 
                     state["RMS"] = 0
                 else:
+                    
                     if use_first_moment:
-                        state["exp_avg"] = state["exp_avg"].to(grad)
+                        if factor_momentum:
+                            
+                            state["exp_avg_mom_row_pos"] = state["exp_avg_mom_row_pos"].to(grad)
+                            state["exp_avg_mom_col_pos"] = state["exp_avg_mom_col_pos"].to(grad)
+                            state["exp_avg_mom_row_neg"] = state["exp_avg_mom_row_neg"].to(grad)
+                            state["exp_avg_mom_col_neg"] = state["exp_avg_mom_col_neg"].to(grad)
+                        else:
+                            state["exp_avg"] = state["exp_avg"].to(grad)
                     if factored:
                         state["exp_avg_sq_row"] = state["exp_avg_sq_row"].to(grad)
                         state["exp_avg_sq_col"] = state["exp_avg_sq_col"].to(grad)
@@ -251,9 +288,51 @@ class Adafactor(torch.optim.Optimizer):
                 update.mul_(group["lr"])
 
                 if use_first_moment:
-                    exp_avg = state["exp_avg"]
-                    exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
-                    update = exp_avg
+                    if factor_momentum:
+                        exp_avg_mom_row_pos = state["exp_avg_mom_row_pos"].unsqueeze(-1)
+                        exp_avg_mom_col_pos = state["exp_avg_mom_col_pos"].unsqueeze(-2)
+                        exp_avg_mom_row_neg = state["exp_avg_mom_row_neg"].unsqueeze(-1)
+                        exp_avg_mom_col_neg = state["exp_avg_mom_col_neg"].unsqueeze(-2)
+                        # print(exp_avg_mom_row_pos.shape,exp_avg_mom_col_pos.shape)
+                        # exp_avg_mom_row_pos.mul_(beta2t).add_(
+                        #     update.mean(dim=-1), alpha=1.0 - beta2t
+                        # )
+
+
+                        # Approximation of exponential moving average of square of gradient
+                        # r_factor, c_factor = self._approx_comp(update)
+                        # neg_r_factor, neg_c_factor = self._approx_comp(-update)
+                        update.mul_(1-group["beta1"])
+                        
+                        # update.add_(torch.mul(exp_avg_mom_row_pos.nan_to_num(), exp_avg_mom_col_pos.nan_to_num()).mul_(group["beta1"]))
+                        # update.add_(-torch.mul(exp_avg_mom_row_neg.nan_to_num(), exp_avg_mom_col_neg.nan_to_num()).mul_(group["beta1"]))
+                        pos = torch.mul(exp_avg_mom_row_pos.nan_to_num(), exp_avg_mom_col_pos.nan_to_num()).mul_(group["beta1"])
+                        neg = -torch.mul(exp_avg_mom_row_neg.nan_to_num(), exp_avg_mom_col_neg.nan_to_num()).mul_(group["beta1"])
+                        
+                        reset_to_vec = False
+                        if len(update.shape)==1:
+                            update = update.unsqueeze(0)
+                            reset_to_vec = True
+
+
+                            
+                        update.add_(pos)
+                        update.add_(neg)
+                        r_factor, c_factor = self._approx_comp(update)
+                        neg_r_factor, neg_c_factor = self._approx_comp(-update)
+                        if reset_to_vec:
+                            update = update.squeeze(0)
+                        exp_avg_mom_row_pos.set_(r_factor)
+                        exp_avg_mom_col_pos.set_(c_factor)
+                        exp_avg_mom_row_neg.set_(neg_r_factor)
+                        exp_avg_mom_col_neg.set_(neg_c_factor)
+                        
+                        # exp_avg = state["exp_avg"]
+                        # exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
+                    else:
+                        exp_avg = state["exp_avg"]
+                        exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
+                        update = exp_avg
 
                 if group["weight_decay"] != 0:
                     p_data_fp32.add_(
@@ -264,5 +343,5 @@ class Adafactor(torch.optim.Optimizer):
 
                 if p.data.dtype in {torch.float16, torch.bfloat16}:
                     p.data.copy_(p_data_fp32)
-
+        
         return loss
