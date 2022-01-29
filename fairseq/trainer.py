@@ -879,6 +879,8 @@ class Trainer(object):
                     else:
                         self._amp_retries += 1
                         return self.train_step(samples, raise_oom)  # recursion to feed in same batch
+            # for metric_name, value in self.optimizer.inner_step_features:
+            #     metrics.log_scalar(metric_name, value, self.get_num_updates())
 
         except FloatingPointError:
             # re-run the forward and backward pass with hooks attached to print

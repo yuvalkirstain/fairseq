@@ -9,7 +9,16 @@ import torch
 import torch.optim
 
 from . import LegacyFairseqOptimizer, register_optimizer
-
+import bisect
+def most_value(arr,k=1):
+    if arr.numel()>4000*500:
+        return 0
+    with torch.no_grad():
+        _,S,_ = torch.linalg.svd(arr)
+    # print(S.shape)
+        l = (torch.cumsum(S,dim=0)/S.sum()).cpu().numpy().tolist()
+    
+    return bisect.bisect_left(l,0.5)
 
 @register_optimizer("adafactor")
 class FairseqAdafactor(LegacyFairseqOptimizer):
@@ -132,6 +141,7 @@ class Adafactor(torch.optim.Optimizer):
             factor_momentum=factor_momentum,
         )
         super(Adafactor, self).__init__(params, defaults)
+        self.inner_step_features = {}
 
     @property
     def supports_memory_efficient_fp16(self):
@@ -204,7 +214,7 @@ class Adafactor(torch.optim.Optimizer):
                     grad = grad.float()
                 if grad.is_sparse:
                     raise RuntimeError("Adafactor does not support sparse gradients.")
-
+                # print(p.name)
                 state = self.state[p]
                 grad_shape = grad.shape
 
@@ -281,7 +291,7 @@ class Adafactor(torch.optim.Optimizer):
 
                     exp_avg_sq.mul_(beta2t).add_(update, alpha=1.0 - beta2t)
                     update = exp_avg_sq.rsqrt().mul_(grad)
-
+                
                 update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0)
                 )
@@ -333,7 +343,8 @@ class Adafactor(torch.optim.Optimizer):
                         exp_avg = state["exp_avg"]
                         exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
                         update = exp_avg
-
+                if len(update.shape)==2:
+                    print(update.shape,most_value(update))
                 if group["weight_decay"] != 0:
                     p_data_fp32.add_(
                         p_data_fp32, alpha=-group["weight_decay"] * group["lr"]
