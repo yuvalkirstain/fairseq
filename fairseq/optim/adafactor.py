@@ -174,13 +174,26 @@ class Adafactor(torch.optim.Optimizer):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
     def _clamp_mult(self,r_factor, c_factor,neg_r_factor, neg_c_factor):
         return torch.mul(r_factor.nan_to_num(), c_factor.nan_to_num()) -torch.mul(neg_r_factor.nan_to_num(), neg_c_factor.nan_to_num())    
-    def _approx_comp(self, update):
-        update = torch.nn.functional.relu(update)
-        exp_avg_sq_row = update.mean(dim=-1)
-        exp_avg_sq_col = update.mean(dim=-2)
+    # def _approx_comp(self, update):
+    #     update = torch.nn.functional.relu(update)
+    #     exp_avg_sq_row = update.mean(dim=-1)
+    #     exp_avg_sq_col = update.mean(dim=-2)
+    #     r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).unsqueeze(-1)
+    #     c_factor = exp_avg_sq_col.unsqueeze(-2)
+    #     return r_factor, c_factor
+    def _approx_comp(self,update,rate=4):    
+        n_rows,n_cols = update.shape
+        assert ((n_rows*n_cols)%rate) ==0
+        assert ((n_rows*n_cols)%(n_cols*rate)) ==0  # 10486016//8192 = 128
+        
+        update_c = update.view([-1,rate,n_cols])
+        min_val = update.view([-1,rate*n_cols]).min(-1).values.unsqueeze(-1).unsqueeze(-1)
+        update_mv = update_c+min_val
+        exp_avg_sq_row = update_mv.mean(dim=-1)
+        exp_avg_sq_col = update_mv.mean(dim=-2)
         r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).unsqueeze(-1)
         c_factor = exp_avg_sq_col.unsqueeze(-2)
-        return r_factor, c_factor
+        return  r_factor, c_factor, min_val
         
     def _approx_sq_grad(self, exp_avg_sq_row, exp_avg_sq_col):
         r_factor = (
@@ -200,6 +213,7 @@ class Adafactor(torch.optim.Optimizer):
                 and returns the loss.
         """
         
+        rate = 4
         factor_momentum = self.defaults['factor_momentum']
         loss = None
         if closure is not None:
@@ -217,23 +231,25 @@ class Adafactor(torch.optim.Optimizer):
                 # print(p.name)
                 state = self.state[p]
                 grad_shape = grad.shape
-
+                should_factor_momentum = factor_momentum and (len(grad_shape)==2)
+                #  and (grad_shape[0] < 100000) and (grad_shape[1] < 100000)
+                if should_factor_momentum:
+                    n_rows,n_cols = grad_shape
                 factored, use_first_moment = self._get_options(group, grad_shape)
                 # State Initialization
                 if len(state) == 0:
                     state["step"] = 0
 
                     if use_first_moment:
-                        if factor_momentum:
+                        if should_factor_momentum:
+                            assert (n_rows%rate)==0
                         # Exponential moving average of gradient values
-                            state["exp_avg_mom_row_pos"] = torch.zeros(grad_shape[:-1]).to(grad)
-                            state["exp_avg_mom_col_pos"] = torch.zeros(
-                                grad_shape[:-2] + grad_shape[-1:]
+                            state["exp_avg_mom_minvals"] = torch.zeros([n_rows//rate,1,1]).to(grad)
+                            state["exp_avg_mom_row"] = torch.zeros([n_rows//rate,rate,1]).to(grad)
+                            state["exp_avg_mom_col"] = torch.zeros([n_rows//rate,1,n_cols]
                             ).to(grad)
-                            state["exp_avg_mom_row_neg"] = torch.zeros(grad_shape[:-1]).to(grad)
-                            state["exp_avg_mom_col_neg"] = torch.zeros(
-                                grad_shape[:-2] + grad_shape[-1:]
-                            ).to(grad)
+                            
+
                         else:
                             state["exp_avg"] = torch.zeros_like(grad)
                     if factored:
@@ -248,12 +264,13 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     
                     if use_first_moment:
-                        if factor_momentum:
+                        if should_factor_momentum:
+                            n_rows,n_cols = grad_shape
+                            state["exp_avg_mom_row"] = state["exp_avg_mom_row"].to(grad)
+                            state["exp_avg_mom_col"] = state["exp_avg_mom_col"].to(grad)
+                            state["exp_avg_mom_minvals"] = state["exp_avg_mom_minvals"].to(grad)
                             
-                            state["exp_avg_mom_row_pos"] = state["exp_avg_mom_row_pos"].to(grad)
-                            state["exp_avg_mom_col_pos"] = state["exp_avg_mom_col_pos"].to(grad)
-                            state["exp_avg_mom_row_neg"] = state["exp_avg_mom_row_neg"].to(grad)
-                            state["exp_avg_mom_col_neg"] = state["exp_avg_mom_col_neg"].to(grad)
+                            
                         else:
                             state["exp_avg"] = state["exp_avg"].to(grad)
                     if factored:
@@ -298,53 +315,28 @@ class Adafactor(torch.optim.Optimizer):
                 update.mul_(group["lr"])
 
                 if use_first_moment:
-                    if factor_momentum:
-                        exp_avg_mom_row_pos = state["exp_avg_mom_row_pos"].unsqueeze(-1)
-                        exp_avg_mom_col_pos = state["exp_avg_mom_col_pos"].unsqueeze(-2)
-                        exp_avg_mom_row_neg = state["exp_avg_mom_row_neg"].unsqueeze(-1)
-                        exp_avg_mom_col_neg = state["exp_avg_mom_col_neg"].unsqueeze(-2)
-                        # print(exp_avg_mom_row_pos.shape,exp_avg_mom_col_pos.shape)
-                        # exp_avg_mom_row_pos.mul_(beta2t).add_(
-                        #     update.mean(dim=-1), alpha=1.0 - beta2t
-                        # )
-
-
-                        # Approximation of exponential moving average of square of gradient
-                        # r_factor, c_factor = self._approx_comp(update)
-                        # neg_r_factor, neg_c_factor = self._approx_comp(-update)
+                    if should_factor_momentum:
+                        exp_avg_mom_row = state["exp_avg_mom_row"]
+                        exp_avg_mom_col = state["exp_avg_mom_col"]
+                        exp_avg_mom_minvals = state["exp_avg_mom_minvals"]
+                        n_rows,n_cols = grad_shape
                         update.mul_(1-group["beta1"])
                         
-                        # update.add_(torch.mul(exp_avg_mom_row_pos.nan_to_num(), exp_avg_mom_col_pos.nan_to_num()).mul_(group["beta1"]))
-                        # update.add_(-torch.mul(exp_avg_mom_row_neg.nan_to_num(), exp_avg_mom_col_neg.nan_to_num()).mul_(group["beta1"]))
-                        pos = torch.mul(exp_avg_mom_row_pos.nan_to_num(), exp_avg_mom_col_pos.nan_to_num()).mul_(group["beta1"])
-                        neg = -torch.mul(exp_avg_mom_row_neg.nan_to_num(), exp_avg_mom_col_neg.nan_to_num()).mul_(group["beta1"])
-                        
-                        reset_to_vec = False
-                        if len(update.shape)==1:
-                            update = update.unsqueeze(0)
-                            reset_to_vec = True
-
-
+                        momentum_term = torch.mul(exp_avg_mom_row, exp_avg_mom_col).sub_(exp_avg_mom_minvals)
+                        momentum_term = momentum_term.mul_(group["beta1"]).reshape([n_rows,n_cols])
                             
-                        update.add_(pos)
-                        update.add_(neg)
-                        r_factor, c_factor = self._approx_comp(update)
-                        neg_r_factor, neg_c_factor = self._approx_comp(-update)
-                        if reset_to_vec:
-                            update = update.squeeze(0)
-                        exp_avg_mom_row_pos.set_(r_factor)
-                        exp_avg_mom_col_pos.set_(c_factor)
-                        exp_avg_mom_row_neg.set_(neg_r_factor)
-                        exp_avg_mom_col_neg.set_(neg_c_factor)
-                        
-                        # exp_avg = state["exp_avg"]
-                        # exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
+                        update.add_(momentum_term)
+                        r_factor, c_factor,min_vals = self._approx_comp(update)
+                        exp_avg_mom_row.set_(r_factor)
+                        exp_avg_mom_col.set_(c_factor)
+                        exp_avg_mom_minvals.set_(min_vals)
+
                     else:
                         exp_avg = state["exp_avg"]
                         exp_avg.mul_(group["beta1"]).add_(update, alpha=1 - group["beta1"])
                         update = exp_avg
-                if len(update.shape)==2:
-                    print(update.shape,most_value(update))
+                # if len(update.shape)==2:
+                #     print(update.shape,most_value(update))
                 if group["weight_decay"] != 0:
                     p_data_fp32.add_(
                         p_data_fp32, alpha=-group["weight_decay"] * group["lr"]
