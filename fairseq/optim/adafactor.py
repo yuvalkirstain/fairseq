@@ -49,6 +49,8 @@ class FairseqAdafactor(LegacyFairseqOptimizer):
                             help='use relative step for warm-up learning rate schedule')
         parser.add_argument('--factor-momentum', action='store_true',
                             help='Factor momentum')
+        parser.add_argument('--factor-rate', default=4, type=int,
+                            help='Factor momentum rate')
         # fmt: on
 
     @property
@@ -71,7 +73,8 @@ class FairseqAdafactor(LegacyFairseqOptimizer):
             "scale_parameter": self.args.scale_parameter,  # defaults to False
             "relative_step": self.args.relative_step,  # defaults to False
             "warmup_init": self.args.warmup_init,
-            "factor_momentum":self.args.factor_momentum
+            "factor_momentum":self.args.factor_momentum,
+           "factor_rate":self.args.factor_rate
         }
 
 
@@ -122,6 +125,7 @@ class Adafactor(torch.optim.Optimizer):
         relative_step=True,
         warmup_init=False,
         factor_momentum=False,
+        factor_rate=4,
     ):
         if lr is not None and relative_step:
             raise ValueError("Cannot combine manual lr and relative_step options")
@@ -139,6 +143,7 @@ class Adafactor(torch.optim.Optimizer):
             relative_step=relative_step,
             warmup_init=warmup_init,
             factor_momentum=factor_momentum,
+            factor_rate=factor_rate,
         )
         super(Adafactor, self).__init__(params, defaults)
         self.inner_step_features = {}
@@ -181,13 +186,13 @@ class Adafactor(torch.optim.Optimizer):
     #     r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).unsqueeze(-1)
     #     c_factor = exp_avg_sq_col.unsqueeze(-2)
     #     return r_factor, c_factor
-    def _approx_comp(self,update,rate=4):    
+    def _approx_comp(self,update,factor_rate=4):    
         n_rows,n_cols = update.shape
-        assert ((n_rows*n_cols)%rate) ==0
-        assert ((n_rows*n_cols)%(n_cols*rate)) ==0  # 10486016//8192 = 128
+        assert ((n_rows*n_cols)%factor_rate) ==0
+        assert ((n_rows*n_cols)%(n_cols*factor_rate)) ==0  # 10486016//8192 = 128
         
-        update_c = update.view([-1,rate,n_cols])
-        min_val = update.view([-1,rate*n_cols]).min(-1).values.unsqueeze(-1).unsqueeze(-1)
+        update_c = update.view([-1,factor_rate,n_cols])
+        min_val = update.view([-1,factor_rate*n_cols]).min(-1).values.unsqueeze(-1).unsqueeze(-1)
         update_mv = update_c+min_val
         exp_avg_sq_row = update_mv.mean(dim=-1)
         exp_avg_sq_col = update_mv.mean(dim=-2)
@@ -213,8 +218,8 @@ class Adafactor(torch.optim.Optimizer):
                 and returns the loss.
         """
         
-        rate = 4
         factor_momentum = self.defaults['factor_momentum']
+        factor_rate = self.defaults['factor_rate']
         loss = None
         if closure is not None:
             loss = closure()
@@ -231,6 +236,7 @@ class Adafactor(torch.optim.Optimizer):
                 # print(p.name)
                 state = self.state[p]
                 grad_shape = grad.shape
+                # print(grad_shape)
                 should_factor_momentum = factor_momentum and (len(grad_shape)==2)
                 #  and (grad_shape[0] < 100000) and (grad_shape[1] < 100000)
                 if should_factor_momentum:
@@ -242,12 +248,15 @@ class Adafactor(torch.optim.Optimizer):
 
                     if use_first_moment:
                         if should_factor_momentum:
-                            assert (n_rows%rate)==0
+                            assert (n_rows%factor_rate)==0
+                            
                         # Exponential moving average of gradient values
-                            state["exp_avg_mom_minvals"] = torch.zeros([n_rows//rate,1,1]).to(grad)
-                            state["exp_avg_mom_row"] = torch.zeros([n_rows//rate,rate,1]).to(grad)
-                            state["exp_avg_mom_col"] = torch.zeros([n_rows//rate,1,n_cols]
+                            state["exp_avg_mom_minvals"] = torch.zeros([n_rows//factor_rate,1,1]).to(grad)
+                            state["exp_avg_mom_row"] = torch.zeros([n_rows//factor_rate,factor_rate,1]).to(grad)
+                            state["exp_avg_mom_col"] = torch.zeros([n_rows//factor_rate,1,n_cols]
                             ).to(grad)
+                            print("exp_avg_mom_col:",state["exp_avg_mom_col"].shape)
+                            print("exp_avg_mom_row:",state["exp_avg_mom_row"].shape)
                             
 
                         else:
@@ -326,7 +335,7 @@ class Adafactor(torch.optim.Optimizer):
                         momentum_term = momentum_term.mul_(group["beta1"]).reshape([n_rows,n_cols])
                             
                         update.add_(momentum_term)
-                        r_factor, c_factor,min_vals = self._approx_comp(update)
+                        r_factor, c_factor,min_vals = self._approx_comp(update,factor_rate)
                         exp_avg_mom_row.set_(r_factor)
                         exp_avg_mom_col.set_(c_factor)
                         exp_avg_mom_minvals.set_(min_vals)
